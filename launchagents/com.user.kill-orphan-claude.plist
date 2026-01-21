@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.kill-orphan-claude</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__INSTALL_DIR__/kill-orphan-claude.sh</string>
+    </array>
+    <!-- Run every 2 hours -->
+    <key>StartInterval</key>
+    <integer>7200</integer>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/tmp/kill-orphan-claude.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/kill-orphan-claude.log</string>
+</dict>
+</plist>
