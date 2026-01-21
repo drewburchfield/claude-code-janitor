@@ -57,7 +57,7 @@ That's why this repo exists. Belt AND suspenders. Trust no one. Not even Claude.
 ## Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/claude-code-maintenance.git
+git clone https://github.com/drewburchfield/claude-code-maintenance.git
 cd claude-code-maintenance
 ./install.sh
 ```
