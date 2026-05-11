@@ -1,4 +1,4 @@
-[![Claude Code Janitor](https://ghrb.waren.build/banner?header=Claude+Code+Janitor+%21%5Bclaude%5D&subheader=Sweep+up+orphaned+Claude+Code+processes&bg=1A1A1A-D97757&color=FFFFFF&headerfont=Inter&subheaderfont=Inter&support=false)](https://github.com/drewburchfield/claude-code-janitor)
+[![Claude Code Janitor](https://ghrb.waren.build/banner?header=%F0%9F%A7%B9+Claude+Code+Janitor+%21%5Bclaude%5D&subheader=Tidy+up+after+Claude+Code+sessions&bg=18181B-27272A&color=FFFFFF&headerfont=Inter&subheaderfont=Inter&support=false)](https://github.com/drewburchfield/claude-code-janitor)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Platform: macOS](https://img.shields.io/badge/platform-macOS-blue.svg)](https://www.apple.com/macos) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/drewburchfield/claude-code-janitor)
 
