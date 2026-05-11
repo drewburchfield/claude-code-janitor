@@ -38,12 +38,12 @@ A process is killed only if it meets all four of these:
 
 | Check | What it confirms |
 |-------|------------------|
-| `PPID == 1` | The original session is gone. The process was adopted by launchd. |
+| `PPID == 1` | The original session is gone. On macOS, `launchd` is PID 1 and adopts orphaned processes. |
 | `CLAUDE_CODE_ENTRYPOINT` in env | The process was spawned by Claude Code CLI, not Claude Desktop or any other tool. |
-| Terminal fds are `(revoked)` | There is no live terminal or pipe. Nothing can talk to it anymore. |
-| Running 6+ hours | Don't touch processes from sessions that just started. |
+| At least one fd shows `(revoked)` in `lsof` | The controlling terminal or pipe is gone. |
+| Running `ORPHAN_MIN_HOURS`+ hours (default 6) | Don't touch processes from sessions that just started. |
 
-The env var check is the key safety floor. Claude Code injects `CLAUDE_CODE_ENTRYPOINT` into every subprocess it spawns (subagents, MCP servers, tool executions). Claude Desktop and other MCP-using tools don't set this variable, so their processes are never candidates here.
+The env var check is the key safety floor. Claude Code injects `CLAUDE_CODE_ENTRYPOINT` into every subprocess it spawns (subagents, MCP servers, tool executions). Claude Desktop and other MCP-using tools don't set this variable today, so their processes are never candidates here. The script also re-verifies this env marker immediately before sending `kill -9`, to close the small PID-reuse race window between candidate identification and the kill itself.
 
 ## Configuration
 
@@ -82,14 +82,13 @@ launchctl list | grep kill-orphan-claude
 log show --predicate 'eventMessage contains "kill-orphan-claude"' --last 1d
 ```
 
-**See what the script would do right now without killing anything:**
+**See what the script would kill right now without killing anything:**
 
 ```bash
-ps -Ao pid,ppid,etime= | awk '$2 == 1 { print $1, $3 }' | while read pid etime; do
-  ps eww -o command= -p "$pid" 2>/dev/null | grep -q "CLAUDE_CODE_ENTRYPOINT=" && \
-    echo "candidate: pid=$pid etime=$etime"
-done
+DRY_RUN=1 ~/.local/bin/kill-orphan-claude.sh
 ```
+
+This applies the same four safety checks as a real run and prints what would have been killed. Always matches actual behavior because it's the same script.
 
 **Run manually:**
 
@@ -99,16 +98,13 @@ done
 
 ## Manual Cleanup
 
-If you want to clear orphans right now without waiting for the scheduled run:
+If you want to reap right now without waiting for the scheduled run:
 
 ```bash
-# List Claude Code orphans
-ps -Ao pid,ppid,etime= | awk '$2 == 1 { print $1, $3 }' | while read pid etime; do
-  ps eww -o command= -p "$pid" 2>/dev/null | grep -q "CLAUDE_CODE_ENTRYPOINT=" && \
-    echo "pid=$pid etime=$etime"
-done
+# Preview first
+DRY_RUN=1 ~/.local/bin/kill-orphan-claude.sh
 
-# Kill them all (read the list above first)
+# Then actually kill
 ~/.local/bin/kill-orphan-claude.sh
 ```
 

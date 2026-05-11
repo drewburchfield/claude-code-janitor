@@ -10,15 +10,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
+PLIST_PATH="$LAUNCH_AGENTS_DIR/com.user.kill-orphan-claude.plist"
 
-RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
+RED='\033[0;31m'
 NC='\033[0m'
 
 info() { echo -e "${GREEN}==>${NC} $1"; }
-warn() { echo -e "${YELLOW}Warning:${NC} $1"; }
-error() { echo -e "${RED}Error:${NC} $1"; exit 1; }
+fail() { echo -e "${RED}Error:${NC} $1" >&2; exit 1; }
 
 install_orphan_killer() {
     info "Installing orphan process killer..."
@@ -28,10 +27,18 @@ install_orphan_killer() {
 
     sed "s|__INSTALL_DIR__|$INSTALL_DIR|g" \
         "$SCRIPT_DIR/launchagents/com.user.kill-orphan-claude.plist" \
-        > "$LAUNCH_AGENTS_DIR/com.user.kill-orphan-claude.plist"
+        > "$PLIST_PATH"
 
-    launchctl unload "$LAUNCH_AGENTS_DIR/com.user.kill-orphan-claude.plist" 2>/dev/null || true
-    launchctl load "$LAUNCH_AGENTS_DIR/com.user.kill-orphan-claude.plist"
+    # Unload may legitimately fail on first install (no agent loaded yet).
+    launchctl unload "$PLIST_PATH" 2>/dev/null || true
+
+    if ! launchctl load "$PLIST_PATH"; then
+        fail "launchctl load failed. Plist is at $PLIST_PATH; try 'plutil -lint $PLIST_PATH' and 'launchctl print-disabled gui/$(id -u)'."
+    fi
+
+    if ! launchctl list | grep -q "com.user.kill-orphan-claude"; then
+        fail "launchctl load returned 0 but the agent did not register. Check $PLIST_PATH and 'log stream --predicate \"subsystem == \\\"com.apple.xpc.launchd\\\"\"'."
+    fi
 
     info "Installed. Runs every 2 hours."
 }
@@ -39,9 +46,13 @@ install_orphan_killer() {
 uninstall() {
     info "Uninstalling..."
 
-    launchctl unload "$LAUNCH_AGENTS_DIR/com.user.kill-orphan-claude.plist" 2>/dev/null || true
-    rm -f "$LAUNCH_AGENTS_DIR/com.user.kill-orphan-claude.plist"
+    launchctl unload "$PLIST_PATH" 2>/dev/null || true
+    rm -f "$PLIST_PATH"
     rm -f "$INSTALL_DIR/kill-orphan-claude.sh"
+
+    if launchctl list | grep -q "com.user.kill-orphan-claude"; then
+        fail "Uninstall removed files but the agent is still registered. Reboot or run 'launchctl bootout gui/$(id -u)/com.user.kill-orphan-claude'."
+    fi
 
     info "Uninstalled."
 }
@@ -49,7 +60,7 @@ uninstall() {
 mkdir -p "$INSTALL_DIR" "$LAUNCH_AGENTS_DIR"
 
 case "${1:-install}" in
-    install|"")
+    install)
         install_orphan_killer
         ;;
     uninstall)
@@ -65,5 +76,6 @@ info "Done"
 echo ""
 echo "Useful commands:"
 echo "  launchctl list | grep kill-orphan-claude    # Check status"
-echo "  cat /tmp/kill-orphan-claude.log             # View logs"
-echo "  $INSTALL_DIR/kill-orphan-claude.sh          # Run manually"
+echo "  log show --predicate 'eventMessage contains \"kill-orphan-claude\"' --last 1d"
+echo "  DRY_RUN=1 $INSTALL_DIR/kill-orphan-claude.sh   # Preview without killing"
+echo "  $INSTALL_DIR/kill-orphan-claude.sh             # Run manually"

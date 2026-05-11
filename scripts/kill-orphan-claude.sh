@@ -4,11 +4,15 @@
 #
 # A process is killed only if it meets ALL of these:
 #   1. PPID == 1                       (reparented to launchd, session gone)
-#   2. Env contains CLAUDE_CODE_ENTRYPOINT (Claude Code spawned this — NOT
+#   2. Env contains CLAUDE_CODE_ENTRYPOINT (Claude Code spawned this, NOT
 #                                          Cursor, NOT Claude Desktop, NOT
 #                                          any other tool's MCP server)
-#   3. Terminal fds are "(revoked)"    (no live terminal connection)
+#   3. At least one fd shows "(revoked)" in lsof (controlling terminal/pipe
+#                                          is gone)
 #   4. Running ORPHAN_MIN_HOURS+ hours (don't touch fresh sessions)
+#
+# Plus: the env-var check is repeated immediately before kill -9 to close
+# the PID-reuse race window between candidate identification and kill.
 #
 # The env-var check is the safety floor. Claude Code injects
 # CLAUDE_CODE_ENTRYPOINT into every subprocess (subagent, MCP server,
@@ -17,6 +21,8 @@
 # killing MCP servers that other apps (Cursor, Codex, Claude Desktop)
 # are actively using.
 #
+# Run with DRY_RUN=1 to print what would be killed without killing.
+#
 # Background: Claude Code does not reliably terminate MCP server child
 # processes or subagent processes on session end. They accumulate as
 # PPID=1 orphans, each holding ~44MB.
@@ -24,54 +30,86 @@
 #   https://github.com/anthropics/claude-code/issues/33947
 #   https://github.com/anthropics/claude-code/issues/40667
 
+# Intentionally NOT using `set -e`. We want best-effort cleanup; one
+# failed lsof or kill should not abort the run. We DO want pipefail so
+# that an upstream `ps` failure surfaces in the heartbeat at the end.
 set -u
+set -o pipefail
 
-# Minimum runtime in hours before a candidate is eligible. Set lower
-# (e.g. 1) for faster cleanup if you start many short sessions.
 MIN_HOURS="${ORPHAN_MIN_HOURS:-6}"
+DRY_RUN="${DRY_RUN:-0}"
 
-# Whitelist: never kill a PID whose command matches this regex, even if
-# it's tagged as a Claude Code orphan. Use to protect any background
-# Claude-spawned process you intentionally keep running.
-WHITELIST="${ORPHAN_WHITELIST:-__never_match_anything__}"
+scanned=0
+killed=0
+refused=0
+ps_failed=0
 
-# Find PPID=1 processes, then read each one's environment block to check
-# for the CLAUDE_CODE_ENTRYPOINT marker. `ps eww` shows env on macOS.
-ps -Ao pid,ppid,etime= | awk '$2 == 1 { print $1, $3 }' | \
+# Find PPID=1 processes, then read each one's env block.
+candidates=$(ps -Ao pid,ppid,etime= | awk '$2 == 1 { print $1, $3 }')
+ps_rc=$?
+if (( ps_rc != 0 )); then
+  ps_failed=1
+fi
+
 while read -r pid etime; do
-  # Skip self-readable env failures (kernel processes, other users, etc.)
+  [[ -z "$pid" ]] && continue
+  scanned=$((scanned + 1))
+
+  # ps eww shows command followed by the process environment. Failure
+  # here (kernel proc, exited mid-scan, other-user proc) just skips.
   envline=$(ps eww -o command= -p "$pid" 2>/dev/null) || continue
 
-  # Hard requirement: must be a Claude Code-spawned process.
+  # Required marker: spawned by Claude Code CLI.
   [[ "$envline" == *"CLAUDE_CODE_ENTRYPOINT="* ]] || continue
 
-  # Whitelist check.
-  if [[ "$envline" =~ $WHITELIST ]]; then
+  # Optional whitelist. Match against command only (not env block) to
+  # avoid short patterns accidentally matching PATH, PWD, etc.
+  cmd_only=$(ps -o command= -p "$pid" 2>/dev/null) || continue
+  if [[ -n "${ORPHAN_WHITELIST:-}" && "$cmd_only" =~ $ORPHAN_WHITELIST ]]; then
     continue
   fi
 
   # Parse etime (MM:SS | HH:MM:SS | D-HH:MM:SS) into hours.
-  hours=0
   if [[ "$etime" == *-* ]]; then
-    hours=999
-  elif [[ "$etime" =~ ^([0-9]+):([0-9]+):([0-9]+)$ ]]; then
-    hours=${BASH_REMATCH[1]}
+    : # has days, definitely eligible
+  elif [[ "$etime" =~ ^([0-9]+):([0-9]+):([0-9]+)$ ]] \
+        && (( BASH_REMATCH[1] >= MIN_HOURS )); then
+    : # eligible
+  else
+    continue # too young or unparseable, skip
   fi
 
-  if (( hours < MIN_HOURS )); then
+  # Final safety: lsof must show at least one revoked fd.
+  if ! lsof -p "$pid" 2>/dev/null | grep -q "(revoked)"; then
     continue
   fi
 
-  # Final safety: only kill if terminal fds are revoked (truly detached).
-  if lsof -p "$pid" 2>/dev/null | grep -q "(revoked)"; then
-    if kill -9 "$pid" 2>/dev/null; then
-      # Strip env block from logged command line; just keep the args.
-      cmd=$(echo "$envline" | awk '{
-        for (i = 1; i <= NF; i++) {
-          if ($i !~ /=/) { for (j = i; j <= NF; j++) printf "%s ", $j; exit }
-        }
-      }')
-      logger "kill-orphan-claude: killed PID $pid (etime: $etime): $cmd"
-    fi
+  if (( DRY_RUN == 1 )); then
+    echo "would kill PID $pid (etime: $etime): $cmd_only"
+    continue
   fi
-done
+
+  # Re-verify the env marker immediately before kill to close the
+  # PID-reuse race window (could be hundreds of ms since first check).
+  recheck=$(ps eww -o command= -p "$pid" 2>/dev/null) || continue
+  [[ "$recheck" == *"CLAUDE_CODE_ENTRYPOINT="* ]] || continue
+
+  # Capture stderr so EPERM (the one error that signals "we identified
+  # the wrong process") is logged loudly.
+  if kill_err=$(kill -9 "$pid" 2>&1); then
+    killed=$((killed + 1))
+    logger "kill-orphan-claude: killed PID $pid (etime: $etime): $cmd_only"
+  elif [[ "$kill_err" == *"Operation not permitted"* ]]; then
+    refused=$((refused + 1))
+    logger "kill-orphan-claude: REFUSED to kill PID $pid (EPERM, candidate logic let through a process we can't kill): $cmd_only"
+  fi
+  # ESRCH (process already exited) silently ignored.
+done <<< "$candidates"
+
+# Heartbeat: a single line every run so the absence of activity is
+# distinguishable from "the script never ran" or "ps broke silently."
+if (( ps_failed == 1 )); then
+  logger "kill-orphan-claude: scan complete (ps enumeration FAILED rc=$ps_rc, scanned=$scanned, killed=$killed, refused=$refused, dry_run=$DRY_RUN)"
+else
+  logger "kill-orphan-claude: scan complete (scanned=$scanned candidates, killed=$killed, refused=$refused, dry_run=$DRY_RUN)"
+fi
