@@ -36,9 +36,25 @@ install_orphan_killer() {
         fail "launchctl load failed. Plist is at $PLIST_PATH; try 'plutil -lint $PLIST_PATH' and 'launchctl print-disabled gui/$(id -u)'."
     fi
 
-    if ! launchctl list | grep -q "com.user.kill-orphan-claude"; then
-        fail "launchctl load returned 0 but the agent did not register. Check $PLIST_PATH and 'log stream --predicate \"subsystem == \\\"com.apple.xpc.launchd\\\"\"'."
-    fi
+    # Retry the registration check briefly. launchctl load returning 0 does
+    # not strictly guarantee the agent is queryable in the next instant.
+    # If it never appears, dump diagnostics so a real failure is debuggable
+    # rather than just "it didn't show up."
+    for attempt in 1 2 3 4 5; do
+        if launchctl list | grep -q "com.user.kill-orphan-claude"; then
+            break
+        fi
+        if (( attempt == 5 )); then
+            echo "--- diagnostics ---" >&2
+            echo "plutil -lint:" >&2
+            plutil -lint "$PLIST_PATH" >&2 || true
+            echo "launchctl print gui/$(id -u)/com.user.kill-orphan-claude:" >&2
+            launchctl print "gui/$(id -u)/com.user.kill-orphan-claude" >&2 2>&1 || true
+            echo "--- end diagnostics ---" >&2
+            fail "launchctl load returned 0 but the agent never registered after 5 checks. See diagnostics above."
+        fi
+        sleep 0.2
+    done
 
     info "Installed. Runs every 2 hours."
 }
