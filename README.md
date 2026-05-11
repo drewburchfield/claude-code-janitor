@@ -1,12 +1,14 @@
-# Claude Code Janitor
+[![Claude Code Janitor](https://ghrb.waren.build/banner?header=Claude+Code+Janitor+%21%5Bclaude%5D&subheader=Sweep+up+orphaned+Claude+Code+processes&bg=1A1A1A-D97757&color=FFFFFF&headerfont=Inter&subheaderfont=Inter&support=false)](https://github.com/drewburchfield/claude-code-janitor)
 
-A tiny macOS launchd-scheduled script that reaps orphaned Claude Code processes and their MCP server children. Safe to run alongside Claude Desktop, Cursor, Codex, and other tools that spawn MCP servers.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Platform: macOS](https://img.shields.io/badge/platform-macOS-blue.svg)](https://www.apple.com/macos) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/drewburchfield/claude-code-janitor)
+
+A small macOS launchd-scheduled script that reaps orphaned Claude Code processes: the CLI itself, its subagents, and any MCP servers it spawned that didn't shut down cleanly. Safe to run alongside Claude Desktop, Cursor, Codex, and other tools that spawn MCP servers.
 
 Built by a Claude Code user who got tired of finding 13 zombie MCP processes hogging memory after closing a terminal tab. If you run Claude Code regularly and notice your fans spinning hours after you stopped using it, this is for you.
 
 ## What It Does
 
-Claude Code spawns subagents and MCP server processes. When you close a terminal tab or a session crashes, those children get reparented to `launchd` (PPID=1) and keep running. Each one holds roughly 44 MB. Multiply by a few days of heavy use and you have a real memory leak.
+Claude Code spawns subagents and MCP server processes. When you close a terminal tab or a session crashes, those children get reparented to `launchd` (PPID=1) and keep running. In our measurements each one held roughly 44 MB, varying with which MCP servers you use. Multiply by a few days of heavy use and you have a real memory leak.
 
 This script runs every 2 hours, finds those orphans, and kills them. It will not touch:
 
@@ -43,7 +45,9 @@ A process is killed only if it meets all four of these:
 | At least one fd shows `(revoked)` in `lsof` | The controlling terminal or pipe is gone. |
 | Running `ORPHAN_MIN_HOURS`+ hours (default 6) | Don't touch processes from sessions that just started. |
 
-The env var check is the key safety floor. Claude Code injects `CLAUDE_CODE_ENTRYPOINT` into every subprocess it spawns (subagents, MCP servers, tool executions). Claude Desktop and other MCP-using tools don't set this variable today, so their processes are never candidates here. The script also re-verifies this env marker immediately before sending `kill -9`, to close the small PID-reuse race window between candidate identification and the kill itself.
+The env var check is the key safety floor. Claude Code injects `CLAUDE_CODE_ENTRYPOINT` into every subprocess it spawns (subagents, MCP servers, tool executions). Claude Desktop, Cursor, Codex, and other MCP-using tools do not set this variable as of May 2026. If Claude Desktop's behavior ever changes upstream and it begins setting `CLAUDE_CODE_ENTRYPOINT`, this assumption breaks and the script could start matching Desktop's MCP children. Re-verify before relying on this with new releases of Claude Desktop.
+
+The script also re-verifies the env marker immediately before sending `kill -9`, to close the small PID-reuse race window between candidate identification and the kill itself.
 
 ## Configuration
 
@@ -52,7 +56,8 @@ Set these environment variables in your shell profile to tune behavior. All are 
 | Variable | Default | What it controls |
 |----------|---------|------------------|
 | `ORPHAN_MIN_HOURS` | `6` | Minimum runtime before a process is eligible. Lower this if you start many short sessions and want faster cleanup. |
-| `ORPHAN_WHITELIST` | (none) | Regex against the process command line. Matches are never killed, even if otherwise eligible. Use to protect a specific Claude-spawned process you intentionally keep running. |
+| `ORPHAN_WHITELIST` | (none) | Regex matched against the process command line only (not env). Matches are never killed, even if otherwise eligible. Use to protect a specific Claude-spawned process you intentionally keep running. |
+| `DRY_RUN` | `0` | Set to `1` to print what would be killed without killing. Same code path as a real run, so the preview never drifts from actual behavior. |
 
 Example: faster cleanup for short-session workflows.
 
@@ -66,7 +71,7 @@ export ORPHAN_MIN_HOURS=1
 - Bash 3.2+ (the version that ships with macOS)
 - Claude Code CLI installed via npm, brew, or the official installer
 
-Not tested on Linux. The detection relies on `ps eww -o command=` showing process environment, which behaves differently on Linux.
+Not tested on Linux. Likely porting concerns: the `etime` field formatting from `ps` (locale-sensitive on some distros), the BSD-specific `(revoked)` string in `lsof` output (Linux `lsof` reports closed terminals differently), and the default destination of `logger` (syslog vs. journald).
 
 ## Troubleshooting
 
@@ -82,6 +87,19 @@ launchctl list | grep kill-orphan-claude
 log show --predicate 'eventMessage contains "kill-orphan-claude"' --last 1d
 ```
 
+Every run emits a single heartbeat line at the end with `scanned`, `killed`, and `refused` counts. If you see the heartbeat but `killed=0` for days while you know orphans exist, jump to the next section.
+
+**Suspect the script is running but not finding orphans:**
+
+The detection relies on `ps eww -o command=` showing the environment block of each candidate process. On stricter macOS configurations (hardened runtime, certain code-signing states, or processes owned by another user), `ps` can return the command line without the env, and the script will silently treat those processes as not Claude orphans. To check whether this is happening:
+
+```bash
+# Pick any PPID=1 process you suspect is a Claude orphan
+ps eww -o command= -p <pid> | tr ' ' '\n' | grep -E "^CLAUDE_|^ANTHROPIC"
+```
+
+If that returns nothing for a process you know was spawned by Claude Code, `ps` cannot read its environment from your shell context. The script will not be able to identify it as an orphan either.
+
 **See what the script would kill right now without killing anything:**
 
 ```bash
@@ -95,6 +113,10 @@ This applies the same four safety checks as a real run and prints what would hav
 ```bash
 ~/.local/bin/kill-orphan-claude.sh
 ```
+
+**Heard `EPERM` in the logs?**
+
+The script logs `REFUSED to kill PID X (EPERM, candidate logic let through a process we can't kill)` if `kill -9` ever returns "Operation not permitted." This should never happen for a process you own. If you see it, something let a non-Drew, non-Claude process through the candidate logic. Open an issue with the log line.
 
 ## Manual Cleanup
 
@@ -113,27 +135,27 @@ DRY_RUN=1 ~/.local/bin/kill-orphan-claude.sh
 The orphaned process problem in Claude Code has been tracked across several upstream issues:
 
 - [#22612](https://github.com/anthropics/claude-code/issues/22612) MCP servers not cleaned up when sessions end
-- [#33947](https://github.com/anthropics/claude-code/issues/33947) MCP server and subagent processes not cleaned up on session end, observed PPID=1 accumulation on macOS
+- [#33947](https://github.com/anthropics/claude-code/issues/33947) MCP server and subagent processes not cleaned up on session end, observed PPID=1 accumulation on macOS (a heavy user reports ~107 unsigned node processes orphaned in a single workday)
 - [#40667](https://github.com/anthropics/claude-code/issues/40667) MCP server processes leak on host after subagent/session termination
 
-Each orphan holds roughly 44 MB. Heavy users report accumulating 100+ orphans within a workday.
+Per-orphan memory varies with which MCP servers you use. In our measurements ~44 MB is typical.
 
 ## Development
 
 The project is two files plus a launchd plist:
 
 ```
-scripts/kill-orphan-claude.sh          # The reaper
+scripts/kill-orphan-claude.sh                   # The reaper
 launchagents/com.user.kill-orphan-claude.plist  # Runs it every 2 hours
-install.sh                              # Copies them into place
+install.sh                                      # Copies them into place
 ```
 
 To test changes:
 
 ```bash
 # Edit scripts/kill-orphan-claude.sh
-./install.sh                            # Reinstalls and reloads the agent
-~/.local/bin/kill-orphan-claude.sh      # Run it once manually
+DRY_RUN=1 bash scripts/kill-orphan-claude.sh    # Preview without killing
+./install.sh                                    # Reinstall and reload the agent
 ```
 
 ## License
